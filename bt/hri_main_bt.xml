@@ -1,0 +1,107 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+
+    <!-- 전체 네비게이션을 최대 6회 재시도 -->
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+
+      <!-- 계획(ComputePath)과 추종(FollowPath)을 파이프라인으로 묶음 -->
+      <PipelineSequence>
+
+        <ControllerSelector selected_controller="{selected_controller}"
+                            default_controller="FollowPath"
+                            topic_name="controller_selector"/>
+
+        <PlannerSelector selected_planner="{selected_planner}"
+                         default_planner="GridBased"
+                         topic_name="planner_selector"/>
+
+        <!-- 1Hz 주기로 경로 갱신 (필요 시) -->
+        <RateController hz="1.0" name="RateControllerComputePathToPose">
+          <RecoveryNode number_of_retries="1" name="RecoveryComputePathToPose">
+            <Fallback name="FallbackComputePathToPose">
+
+              <!-- 새 goal이 아니고, 기존 path가 유효하면 재계획 생략 -->
+              <ReactiveSequence name="CheckIfNewPathNeeded">
+                <Inverter>
+                  <GlobalUpdatedGoal/>
+                </Inverter>
+                <IsPathValid path="{path}"/>
+              </ReactiveSequence>
+
+              <ComputePathToPose goal="{goal}"
+                                 path="{path}"
+                                 planner_id="{selected_planner}"
+                                 error_code_id="{compute_path_error_code}"
+                                 error_msg="{compute_path_error_msg}"/>
+            </Fallback>
+
+            <!-- Planner 실패 시: 글로벌 코스트맵 클리어 -->
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+
+        <!-- 컨트롤러(추종) 실패 대응:
+             1) 먼저 "잠깐 대기" 후 재시도
+             2) 그래도 실패하면 local costmap clear 후 재시도
+             3) 여기서도 실패하면 상위(글로벌) 복구 서브트리로 에스컬레이션 -->
+        <RecoveryNode number_of_retries="2" name="RecoveryFollowPath_WaitThenRecover">
+
+          <FollowPath path="{path}"
+                      controller_id="{selected_controller}"
+                      error_code_id="{follow_path_error_code}"
+                      error_msg="{follow_path_error_msg}"/>
+
+          <!-- 컨트롤러 에러 코드가 "복구가 도움 될 타입"일 때만 아래 복구 수행 -->
+          <Sequence name="ControllerContextRecoveries">
+            <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+
+            <!-- RoundRobin: 첫 실패 때는 Wait, 두 번째 실패 때는 ClearLocal (wrap_around=false라 이후엔 FAILURE) -->
+            <RoundRobin name="LocalRecoveryRR" wrap_around="false">
+              <Wait name="WaitForDynamicObstacle" wait_duration="2.0"/>
+              <ClearEntireCostmap name="ClearLocalCostmap-Context"
+                                  service_name="local_costmap/clear_entirely_local_costmap"/>
+            </RoundRobin>
+          </Sequence>
+
+        </RecoveryNode>
+
+      </PipelineSequence>
+
+      <!-- 상위(시스템 레벨) 복구:
+           컨텍스트 복구로 해결 안 되면 여기로 진입 -->
+      <ReactiveFallback name="FallbackRecoveries">
+        <GoalUpdated/>
+
+        <RoundRobin name="RecoveryActions" wrap_around="true">
+          <!-- 1) 사람이 지나가길 기다리는(더 긴) 대기 -->
+          <Wait name="WaitRecovery" wait_duration="5.0"/>
+
+          <!-- 2) costmap 클리어 -->
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree"
+                                service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+
+          <!-- 3) 시야/센서 갱신 목적의 회전 -->
+          <Spin name="SpinRecovery"
+                spin_dist="1.57"
+                error_code_id="{spin_error_code}"
+                error_msg="{spin_error_msg}"/>
+
+          <!-- 4) 최소 후진 -->
+          <BackUp name="BackUpRecovery"
+                  backup_dist="0.30"
+                  backup_speed="0.05"
+                  error_code_id="{backup_error_code}"
+                  error_msg="{backup_error_msg}"/>
+        </RoundRobin>
+
+      </ReactiveFallback>
+
+    </RecoveryNode>
+
+  </BehaviorTree>
+</root>

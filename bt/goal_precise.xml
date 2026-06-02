@@ -1,0 +1,4 @@
+<FollowPath
+  path="{path}"
+  controller_id="FollowPath"
+  goal_checker_id="precise"/>
